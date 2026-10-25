@@ -68,3 +68,54 @@ a = index.index(START)+len(START); b = index.index(END)
 (OUT / 'index.html').write_text(index[:a]+'\n'+content+'\n'+index[b:], encoding='utf-8')
 (OUT / '.nojekyll').touch()
 print('Built', len(cards), 'guide cards in _site; source files unchanged.')
+
+# Automatic sitemap, based on files actually written to _site.
+# Change SITE_URL only if the published host or repository path changes.
+from urllib.parse import urljoin, urlsplit, quote
+import xml.etree.ElementTree as ET
+SITE_URL = os.environ.get('SITE_URL', 'https://testnestai.github.io/Testnestai/').rstrip('/') + '/'
+site_parts = urlsplit(SITE_URL)
+if site_parts.scheme != 'https' or not site_parts.netloc or site_parts.query or site_parts.fragment:
+    raise RuntimeError('SITE_URL must be an absolute HTTPS URL ending at the site folder')
+
+class SitemapMetadata(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.noindex = False; self.redirect = False; self.canonical = None
+    def handle_starttag(self, tag, attrs):
+        attrs = {str(k).lower(): v or '' for k, v in attrs}
+        if tag.lower() == 'meta':
+            if attrs.get('name', '').lower() in {'robots', 'googlebot'} and re.search(r'\b(noindex|none)\b', attrs.get('content', ''), re.I):
+                self.noindex = True
+            if attrs.get('http-equiv', '').lower() == 'refresh': self.redirect = True
+        if tag.lower() == 'link' and 'canonical' in attrs.get('rel', '').lower().split():
+            self.canonical = attrs.get('href')
+
+NS = 'http://www.sitemaps.org/schemas/sitemap/0.9'
+ET.register_namespace('', NS)
+urlset = ET.Element('{' + NS + '}urlset')
+urls = set()
+for page in sorted(OUT.rglob('*.html')):
+    relative = page.relative_to(OUT)
+    if any(part.startswith('.') for part in relative.parts): continue
+    if page.name.lower() in {'404.html', 'guide-template.html'}: continue
+    details = SitemapMetadata(); details.feed(page.read_text(encoding='utf-8'))
+    if details.noindex or details.redirect: continue
+    path = relative.as_posix()
+    if path == 'index.html': path = ''
+    elif path.endswith('/index.html'): path = path[:-len('index.html')]
+    location = urljoin(SITE_URL, quote(path, safe='/'))
+    if details.canonical:
+        canonical = urljoin(location, details.canonical)
+        if canonical != location:
+            # Treat /index.html and / as the same homepage, but exclude true duplicates
+            # and pages whose canonical points outside this site's published base path.
+            if canonical != location + 'index.html': continue
+    if not location.startswith(SITE_URL): continue
+    urls.add(location)
+for location in sorted(urls):
+    node = ET.SubElement(urlset, '{' + NS + '}url')
+    ET.SubElement(node, '{' + NS + '}loc').text = location
+# No fake lastmod timestamps, priorities or change frequencies.
+ET.indent(urlset, space='  ')
+ET.ElementTree(urlset).write(OUT / 'sitemap.xml', encoding='utf-8', xml_declaration=True)
+print('Built sitemap.xml with', len(urls), 'canonical, indexable page URLs.')
